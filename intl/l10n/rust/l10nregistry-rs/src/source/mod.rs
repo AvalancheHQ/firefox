@@ -114,6 +114,33 @@ impl Future for ResourceStatus {
     }
 }
 
+/// Pre-split representation of the `pre_path` template string.
+///
+/// By splitting the `{locale}` placeholder at construction time, we avoid
+/// repeated string searching (`str::replace` uses `StrSearcher::new`) and
+/// intermediate allocations on every `get_path` call.
+#[derive(Clone, Debug)]
+enum PrePathParts {
+    /// The pre_path contained `{locale}` — store the parts before and after it.
+    Split { prefix: String, suffix: String },
+    /// The pre_path did not contain `{locale}` — use it verbatim.
+    Literal(String),
+}
+
+impl PrePathParts {
+    fn from_pre_path(pre_path: &str) -> Self {
+        const PLACEHOLDER: &str = "{locale}";
+        if let Some(pos) = pre_path.find(PLACEHOLDER) {
+            PrePathParts::Split {
+                prefix: pre_path[..pos].to_string(),
+                suffix: pre_path[pos + PLACEHOLDER.len()..].to_string(),
+            }
+        } else {
+            PrePathParts::Literal(pre_path.to_string())
+        }
+    }
+}
+
 /// `FileSource` provides a generic fetching and caching of fluent resources.
 /// The user of `FileSource` provides a [`FileFetcher`](trait.FileFetcher.html)
 /// implementation and `FileSource` takes care of the rest.
@@ -123,6 +150,8 @@ pub struct FileSource {
     pub name: String,
     /// Pre-formatted path for the FileSource, e.g. "/browser/data/locale/{locale}/"
     pub pre_path: String,
+    /// Pre-split parts of the pre_path for fast path construction.
+    pre_path_parts: PrePathParts,
     /// Metasource name for the FileSource, e.g. "app", "langpack"
     /// Only sources from the same metasource are passed into the solver.
     pub metasource: String,
@@ -174,10 +203,12 @@ impl FileSource {
         options: FileSourceOptions,
         fetcher: impl FileFetcher + 'static,
     ) -> Self {
+        let pre_path_parts = PrePathParts::from_pre_path(&pre_path);
         FileSource {
             name,
             metasource: metasource.unwrap_or_default(),
             pre_path,
+            pre_path_parts,
             locales,
             index: None,
             shared: Rc::new(Inner {
@@ -198,10 +229,12 @@ impl FileSource {
         fetcher: impl FileFetcher + 'static,
         index: Vec<String>,
     ) -> Self {
+        let pre_path_parts = PrePathParts::from_pre_path(&pre_path);
         FileSource {
             name,
             metasource: metasource.unwrap_or_default(),
             pre_path,
+            pre_path_parts,
             locales,
             index: Some(index),
             shared: Rc::new(Inner {
@@ -237,11 +270,28 @@ fn calculate_pos_in_source(source: &str, idx: usize) -> (usize, usize) {
 
 impl FileSource {
     fn get_path(&self, locale: &LanguageIdentifier, resource_id: &ResourceId) -> String {
-        format!(
-            "{}{}",
-            self.pre_path.replace("{locale}", &locale.to_string()),
-            resource_id.value,
-        )
+        use std::fmt::Write;
+        match &self.pre_path_parts {
+            PrePathParts::Split { prefix, suffix } => {
+                // Pre-allocate: prefix + ~10 bytes for locale + suffix + resource_id
+                let cap = prefix.len() + 10 + suffix.len() + resource_id.value.len();
+                let mut result = String::with_capacity(cap);
+                result.push_str(prefix);
+                // Write locale directly into the buffer via Display trait,
+                // avoiding the intermediate String allocation from to_string().
+                write!(result, "{}", locale).unwrap();
+                result.push_str(suffix);
+                result.push_str(&resource_id.value);
+                result
+            }
+            PrePathParts::Literal(pre_path) => {
+                let mut result =
+                    String::with_capacity(pre_path.len() + resource_id.value.len());
+                result.push_str(pre_path);
+                result.push_str(&resource_id.value);
+                result
+            }
+        }
     }
 
     fn fetch_sync(&self, resource_id: &ResourceId) -> ResourceOption {
