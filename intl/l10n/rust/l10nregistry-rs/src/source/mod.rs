@@ -237,11 +237,23 @@ fn calculate_pos_in_source(source: &str, idx: usize) -> (usize, usize) {
 
 impl FileSource {
     fn get_path(&self, locale: &LanguageIdentifier, resource_id: &ResourceId) -> String {
-        format!(
-            "{}{}",
-            self.pre_path.replace("{locale}", &locale.to_string()),
-            resource_id.value,
-        )
+        use std::fmt::Write;
+        const PLACEHOLDER: &str = "{locale}";
+        let pre_path = &self.pre_path;
+
+        let cap = pre_path.len() + resource_id.value.len() + 10;
+        let mut result = String::with_capacity(cap);
+
+        let mut last = 0;
+        while let Some(pos) = pre_path[last..].find(PLACEHOLDER) {
+            let abs_pos = last + pos;
+            result.push_str(&pre_path[last..abs_pos]);
+            write!(result, "{}", locale).unwrap();
+            last = abs_pos + PLACEHOLDER.len();
+        }
+        result.push_str(&pre_path[last..]);
+        result.push_str(&resource_id.value);
+        result
     }
 
     fn fetch_sync(&self, resource_id: &ResourceId) -> ResourceOption {

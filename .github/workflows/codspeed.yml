@@ -1,0 +1,29 @@
+name: CodSpeed Benchmarks
+'on':
+  push:
+    branches:
+    - main
+  pull_request: null
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    - name: Install cargo-codspeed
+      run: cargo install cargo-codspeed --locked
+    - name: Build benchmarks
+      working-directory: intl/l10n/rust/l10nregistry-tests
+      run: cargo codspeed build --bench source --bench registry --bench solver --bench
+        preferences
+    - name: Run benchmarks
+      uses: CodSpeedHQ/action@v4
+      with:
+        upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
+        working-directory: intl/l10n/rust/l10nregistry-tests
+        run: cargo codspeed run
