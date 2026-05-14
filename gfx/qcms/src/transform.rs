@@ -215,7 +215,7 @@ fn clamp_u8(v: f32) -> u8 {
     } else if v < 0. {
         0
     } else {
-        (v + 0.5).floor() as u8
+        (v + 0.5) as u8 // v >= 0, so truncation == floor
     }
 }
 
