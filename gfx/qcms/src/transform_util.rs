@@ -68,8 +68,9 @@ pub fn lut_interp_linear(mut input_value: f64, table: &[u16]) -> f32 {
 
     input_value *= (table.len() - 1) as f64;
 
-    let upper: i32 = input_value.ceil() as i32;
-    let lower: i32 = input_value.floor() as i32;
+    let lower: i32 = input_value as i32; // truncation = floor for non-negative values
+    let upper: i32 = lower + 1; // avoids ceil(); .min() below clamps to valid range
+
     let value: f32 = ((table[(upper as usize).min(table.len() - 1)] as f64)
         * (1. - (upper as f64 - input_value))
         + (table[(lower as usize).min(table.len() - 1)] as f64 * (upper as f64 - input_value)))
