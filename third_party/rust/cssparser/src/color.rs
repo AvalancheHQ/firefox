@@ -139,21 +139,57 @@ impl ToCss for PredefinedColorSpace {
     }
 }
 
+/// Lookup table mapping ASCII bytes to their hexadecimal value.
+///
+/// Valid hex digits map to their value (0..=15). Every other byte maps to
+/// `0xFF`, which is used as a sentinel to detect invalid input with a single
+/// comparison.
+const HEX_LUT: [u8; 256] = {
+    let mut table = [0xFF_u8; 256];
+    let mut i: u16 = 0;
+    while i < 256 {
+        table[i as usize] = match i as u8 {
+            b'0'..=b'9' => i as u8 - b'0',
+            b'a'..=b'f' => i as u8 - b'a' + 10,
+            b'A'..=b'F' => i as u8 - b'A' + 10,
+            _ => 0xFF,
+        };
+        i += 1;
+    }
+    table
+};
+
+/// Convert a pair of hexadecimal digits into a single byte.
+///
+/// Both digits are looked up in [`HEX_LUT`] and their validity is checked with
+/// a single branch: invalid digits map to `0xFF`, so OR-ing the two results and
+/// comparing against `0x0F` detects whether either was out of range.
+#[inline]
+fn from_hex_pair(hi: u8, lo: u8) -> Result<u8, ()> {
+    let h = HEX_LUT[hi as usize];
+    let l = HEX_LUT[lo as usize];
+    if (h | l) > 0x0F {
+        Err(())
+    } else {
+        Ok(h << 4 | l)
+    }
+}
+
 /// Parse a color hash, without the leading '#' character.
 #[allow(clippy::result_unit_err)]
 #[inline]
 pub fn parse_hash_color(value: &[u8]) -> Result<(u8, u8, u8, f32), ()> {
     Ok(match value.len() {
         8 => (
-            from_hex(value[0])? * 16 + from_hex(value[1])?,
-            from_hex(value[2])? * 16 + from_hex(value[3])?,
-            from_hex(value[4])? * 16 + from_hex(value[5])?,
-            (from_hex(value[6])? * 16 + from_hex(value[7])?) as f32 / 255.0,
+            from_hex_pair(value[0], value[1])?,
+            from_hex_pair(value[2], value[3])?,
+            from_hex_pair(value[4], value[5])?,
+            from_hex_pair(value[6], value[7])? as f32 / 255.0,
         ),
         6 => (
-            from_hex(value[0])? * 16 + from_hex(value[1])?,
-            from_hex(value[2])? * 16 + from_hex(value[3])?,
-            from_hex(value[4])? * 16 + from_hex(value[5])?,
+            from_hex_pair(value[0], value[1])?,
+            from_hex_pair(value[2], value[3])?,
+            from_hex_pair(value[4], value[5])?,
             OPAQUE,
         ),
         4 => (
@@ -343,10 +379,10 @@ pub fn all_named_colors() -> impl Iterator<Item = (&'static str, (u8, u8, u8))> 
 
 #[inline]
 fn from_hex(c: u8) -> Result<u8, ()> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(()),
+    let val = HEX_LUT[c as usize];
+    if val > 0x0F {
+        Err(())
+    } else {
+        Ok(val)
     }
 }
