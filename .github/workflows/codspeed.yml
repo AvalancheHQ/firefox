@@ -6,8 +6,8 @@ name: CodSpeed
 on:
   push:
     branches:
-      - codspeed
-      - codspeed/**
+      - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
