@@ -41,6 +41,18 @@ jobs:
           echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated)"
           echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
           echo "nproc:         $(nproc)"
+          echo "shm:           $(ls -ld /dev/shm 2>&1)"
+
+      # mozbuild's BuildReader opens a ProcessPoolExecutor, which needs POSIX
+      # semaphores; these runners come up without a /dev/shm mount.
+      - name: Ensure shared memory is available
+        run: |
+          if ! python3 -c 'import multiprocessing; multiprocessing.Lock()' 2>/dev/null; then
+            sudo mkdir -p /dev/shm
+            sudo mount -t tmpfs -o size=1G,mode=1777 tmpfs /dev/shm
+          fi
+          df -h /dev/shm
+          python3 -c 'import multiprocessing; multiprocessing.Lock(); print("posix semaphores ok")'
 
       # The image ships rustup, m4, make, pkg-config and python3; mach needs a
       # venv module, a new enough clang, and its own cbindgen.
