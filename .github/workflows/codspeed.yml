@@ -19,7 +19,9 @@ env:
   MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
   # Pinned so the generated code, and therefore the measurements, only change
   # when we bump them.
-  CLANG_VERSION: "18"
+  # The tree rejects anything older than 19.0 (build/moz.configure/toolchain.configure),
+  # and the runner image only ships up to clang 18.
+  CLANG_VERSION: "19"
   RUST_VERSION: "1.94.1"
   CBINDGEN_VERSION: "0.29.4"
 
@@ -40,12 +42,16 @@ jobs:
           echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
           echo "nproc:         $(nproc)"
 
-      # The image ships clang 16/17/18, rustup, m4, make and python3; mach only
-      # additionally needs a venv module and its own cbindgen.
+      # The image ships rustup, m4, make, pkg-config and python3; mach needs a
+      # venv module, a new enough clang, and its own cbindgen.
       - name: Install build prerequisites
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends python3-venv
+          if ! command -v "clang-${CLANG_VERSION}" >/dev/null; then
+            curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- "${CLANG_VERSION}"
+          fi
+          sudo apt-get install -y --no-install-recommends "lld-${CLANG_VERSION}" "llvm-${CLANG_VERSION}"
 
       - uses: dtolnay/rust-toolchain@master
         with:
