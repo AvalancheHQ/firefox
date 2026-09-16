@@ -1,0 +1,106 @@
+name: CodSpeed
+
+# Builds the SpiderMonkey JS shell and runs the six-speed suite through the
+# CodSpeed walltime instrument on the gen2 staging macro runners (COD-3534).
+
+on:
+  push:
+    branches:
+      - codspeed
+      - codspeed/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # for OpenID Connect authentication with CodSpeed
+
+env:
+  MOZCONFIG: ${{ github.workspace }}/.github/mozconfig.codspeed
+  MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
+  # Pinned so the generated code, and therefore the measurements, only change
+  # when we bump them.
+  CLANG_VERSION: "18"
+  RUST_VERSION: "1.94.1"
+  CBINDGEN_VERSION: "0.29.4"
+
+jobs:
+  six-speed:
+    name: six-speed (walltime)
+    runs-on: codspeed-macro-staging-x86-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the machine
+        run: |
+          hostname
+          cat /etc/codspeed-image-release || true
+          echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated)"
+          echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
+          echo "nproc:         $(nproc)"
+
+      # The image ships clang 16/17/18, rustup, m4, make and python3; mach only
+      # additionally needs a venv module and its own cbindgen.
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-venv
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cbindgen
+        id: cbindgen-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: cbindgen-${{ runner.os }}-${{ env.CBINDGEN_VERSION }}
+
+      - name: Install cbindgen
+        if: steps.cbindgen-cache.outputs.cache-hit != 'true'
+        run: cargo install cbindgen --locked --version ${{ env.CBINDGEN_VERSION }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache mach virtualenvs
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MOZBUILD_STATE_PATH }}
+          key: mozbuild-${{ runner.os }}-${{ hashFiles('build/moz.configure/**', 'python/sites/*.txt') }}
+          restore-keys: |
+            mozbuild-${{ runner.os }}-
+
+      - name: Report the toolchain
+        env:
+          CC: clang-${{ env.CLANG_VERSION }}
+          CXX: clang++-${{ env.CLANG_VERSION }}
+        run: |
+          $CC --version | head -1
+          rustc --version
+          cargo --version
+          cbindgen --version
+          sccache --version
+          python3 --version
+
+      - name: Build the JS shell
+        env:
+          CC: clang-${{ env.CLANG_VERSION }}
+          CXX: clang++-${{ env.CLANG_VERSION }}
+          SCCACHE_GHA_ENABLED: "true"
+        run: ./mach build -j$(nproc)
+
+      - name: Report build cache and binary state
+        run: |
+          sccache --show-stats
+          ls -la obj-codspeed/dist/bin/js
+          obj-codspeed/dist/bin/js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@main
+        with:
+          mode: walltime
+          upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
+          config: codspeed.yaml
