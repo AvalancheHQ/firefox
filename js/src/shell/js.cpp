@@ -158,6 +158,7 @@
 #include "js/WasmModule.h"    // JS::WasmModule
 #include "js/Wrapper.h"
 #include "proxy/DeadObjectProxy.h"  // js::IsDeadProxyObject
+#include "shell/CodSpeed.h"
 #include "shell/jsoptparse.h"
 #include "shell/jsshell.h"
 #include "shell/OSObject.h"
@@ -11984,6 +11985,10 @@ static JSObject* NewGlobalObject(JSContext* cx, JS::RealmOptions& options,
       return nullptr;
     }
 
+    if (!fuzzingSafe && !DefineCodSpeed(cx, glob)) {
+      return nullptr;
+    }
+
     if (!js::SupportDifferentialTesting()) {
       if (!JS_DefineFunctionsWithHelp(cx, glob,
                                       diff_testing_unsafe_functions)) {
@@ -12864,6 +12869,7 @@ int main(int argc, char** argv) {
     ShutdownBufferStreams();
     js_delete(bufferStreamState);
   });
+  auto shutdownCodSpeed = MakeScopeExit([] { ShutdownCodSpeed(); });
   JS::InitConsumeStreamCallback(cx, ConsumeBufferSource, ReportStreamError);
 
   JS::SetPromiseRejectionTrackerCallback(
