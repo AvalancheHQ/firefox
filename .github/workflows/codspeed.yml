@@ -13,6 +13,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The macro fleet runs one job per machine; a superseded push should not hold
+# it for another twenty minutes.
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   id-token: write # for OpenID Connect authentication with CodSpeed
@@ -161,7 +167,16 @@ jobs:
       SUITES: ${{ github.workspace }}/third_party/webkit/PerformanceTests
 
     steps:
+      # The full tree is 480k files and takes two minutes to check out; the
+      # suites need 160 of them.
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            third_party/webkit/PerformanceTests/codspeed
+            third_party/webkit/PerformanceTests/six-speed
+            third_party/webkit/PerformanceTests/SunSpider
+            third_party/webkit/PerformanceTests/ARES-6
+          sparse-checkout-cone-mode: true
 
       - uses: actions/download-artifact@v4
         with:
