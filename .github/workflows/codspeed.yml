@@ -41,6 +41,8 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # depth 1 already: the ~100 s here is one commit's 480k-file tree, not
+      # history, and the js build reads too much of it to scope further.
       - uses: actions/checkout@v4
 
       - name: Report the machine
