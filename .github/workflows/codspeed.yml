@@ -12,6 +12,11 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      profiler:
+        description: Record perf profiles (per-benchmark flamegraphs)
+        type: boolean
+        default: false
 
 # The macro fleet runs one job per machine; a superseded push should not hold
 # it for another twenty minutes.
@@ -208,13 +213,13 @@ jobs:
           echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
           js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
 
-      # The profiler is off on purpose: the shell cannot mark benchmark
-      # boundaries for perf yet, so a profile could not be attributed to the
-      # individual subtests anyway.
+      # Off by default while the harness settles; the shell marks benchmark
+      # boundaries through codspeed-cpp core, so turning it on gives
+      # per-benchmark flamegraphs with no other change.
       - name: Run benchmarks
         uses: CodSpeedHQ/action@main
         env:
-          CODSPEED_PROFILER_ENABLED: "false"
+          CODSPEED_PROFILER_ENABLED: ${{ inputs.profiler == true && 'true' || 'false' }}
         with:
           mode: walltime
           upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}

@@ -44,14 +44,19 @@ const runners = [
 ];
 
 for (const [runner, file] of runners) {
+  const path = "ARES-6/" + file;
   const firstIteration = [];
   const averageWorstCase = [];
   const steadyState = [];
 
+  // One program run is the profiler's unit; its 200 iterations feed all
+  // three metrics, so the run is reported under the steadyState name.
   for (let i = 0; i < REPETITIONS; i++) {
     gc();
     reportedTimes = null;
-    runner.run();
+    codspeedHarness.runInstrumented(codspeedHarness.uriFor(path, runner.name + "-steadyState"), () =>
+      runner.run()
+    );
     if (!reportedTimes) {
       throw new Error(runner.name + " did not report results");
     }
@@ -62,20 +67,12 @@ for (const [runner, file] of runners) {
     steadyState.push(...steady);
   }
 
-  const path = "ARES-6/" + file;
   for (const [metric, samples] of [
     ["firstIteration", firstIteration],
     ["averageWorstCase", averageWorstCase],
     ["steadyState", steadyState],
   ]) {
-    const result = codspeedHarness.record(runner.name + "-" + metric, path, samples, {
-      benchConfig: { max_rounds: samples.length },
-    });
-    print(
-      result.name.padEnd(40) +
-        ("mean " + (result.stats.mean_ns / 1e6).toFixed(3) + " ms").padEnd(22) +
-        result.stats.rounds + " rounds"
-    );
+    codspeedHarness.record(runner.name + "-" + metric, path, samples.map(() => 1), samples);
   }
 }
 

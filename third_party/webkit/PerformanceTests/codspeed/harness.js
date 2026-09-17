@@ -2,21 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// CodSpeed walltime harness for the SpiderMonkey JS shell.
+// CodSpeed harness for the SpiderMonkey JS shell.
 //
 // Suite drivers in this directory call `codspeedHarness.bench()` once per
-// subtest and `codspeedHarness.finish()` at the end. Under the CodSpeed
-// runner ($CODSPEED_PROFILE_FOLDER set) the results are written in the same
-// JSON format codspeed-node produces; otherwise a table is printed.
-//
-// `codspeed.*` calls go through no-op stubs so the drivers keep working
-// unchanged once the shell exposes native instrument-hooks builtins.
+// subtest and `codspeedHarness.finish()` at the end. Measurement, runner
+// communication and the walltime report are done by the shell's `codspeed`
+// object (js/src/shell/CodSpeed.cpp, on top of the vendored codspeed-cpp
+// core); this file only decides how many times to run what.
 
 var codspeedHarness = (function () {
   "use strict";
 
-  const INTEGRATION_NAME = "spidermonkey-jsshell";
-  const INTEGRATION_VERSION = "0.1.0";
+  if (typeof codspeed !== "object") {
+    throw new Error("this shell has no codspeed object; build js/src/shell with CodSpeed.cpp");
+  }
+
   const URI_PREFIX = "third_party/webkit/PerformanceTests/";
 
   function envNumber(name, fallback) {
@@ -31,85 +31,44 @@ var codspeedHarness = (function () {
     minRounds: envNumber("CODSPEED_JS_MIN_ROUNDS", 10),
   };
 
-  const hooks =
-    typeof codspeed === "object"
-      ? codspeed
-      : {
-          startBenchmark() {},
-          stopBenchmark() {},
-          setExecutedBenchmark() {},
-        };
+  // Under CPU simulation the runner counts instructions between start and
+  // end, so exactly one call is measured instead of timed rounds.
+  const runnerMode = os.getenv("CODSPEED_RUNNER_MODE") || "walltime";
+  const singleShot = runnerMode === "simulation" || runnerMode === "instrumentation";
 
-  const benchmarks = [];
+  let count = 0;
 
   function nowNs() {
     return performance.now() * 1e6;
   }
 
-  function __codspeed_root_frame__(fn, iterations) {
-    const start = nowNs();
-    for (let i = 0; i < iterations; i++) {
-      fn();
-    }
-    return nowNs() - start;
+  function uriFor(file, name) {
+    return URI_PREFIX + file + "::" + name;
   }
 
-  function quantile(sorted, position) {
-    const index = (sorted.length - 1) * position;
-    const lower = Math.floor(index);
-    const upper = Math.ceil(index);
-    if (lower === upper) {
-      return sorted[lower];
-    }
-    return sorted[lower] + (index - lower) * (sorted[upper] - sorted[lower]);
-  }
-
-  function computeStats(samplesNs, iterPerRound, warmupIters) {
-    const sorted = samplesNs.slice().sort((a, b) => a - b);
-    const n = sorted.length;
-    const mean = sorted.reduce((acc, t) => acc + t, 0) / n;
-    const variance =
-      n > 1
-        ? sorted.reduce((acc, t) => acc + (t - mean) * (t - mean), 0) / (n - 1)
-        : 0;
-    const stdev = Math.sqrt(variance);
-    const q1 = quantile(sorted, 0.25);
-    const q3 = quantile(sorted, 0.75);
-    const iqr = q3 - q1;
-    return {
-      min_ns: sorted[0],
-      max_ns: sorted[n - 1],
-      mean_ns: mean,
-      stdev_ns: stdev,
-      q1_ns: q1,
-      median_ns: quantile(sorted, 0.5),
-      q3_ns: q3,
-      rounds: n,
-      total_time: (sorted.reduce((acc, t) => acc + t, 0) * iterPerRound) / 1e9,
-      iqr_outlier_rounds: sorted.filter(t => t < q1 - 1.5 * iqr || t > q3 + 1.5 * iqr).length,
-      stdev_outlier_rounds: sorted.filter(t => t < mean - 3 * stdev || t > mean + 3 * stdev).length,
-      iter_per_round: iterPerRound,
-      warmup_iters: warmupIters,
-    };
-  }
-
-  // Records one benchmark from per-round sample durations. `samplesNs` are
-  // per-iteration times; each round ran `iterPerRound` iterations.
-  function record(name, file, samplesNs, { iterPerRound = 1, warmupIters = 0, benchConfig = {} } = {}) {
-    const uri = URI_PREFIX + file + "::" + name;
-    hooks.setExecutedBenchmark(uri);
-    benchmarks.push({
-      name,
-      uri,
-      config: {
-        warmup_time_ns: benchConfig.warmup_time_ns ?? null,
-        min_round_time_ns: benchConfig.min_round_time_ns ?? null,
-        max_time_ns: benchConfig.max_time_ns ?? null,
-        max_rounds: benchConfig.max_rounds ?? null,
-      },
-      stats: computeStats(samplesNs, iterPerRound, warmupIters),
+  // One measured round: `iterations` calls of `fn` as a single script so the
+  // JIT inlines the loop, executed under __codspeed_root_frame__.
+  function measureRound(fn, iterations) {
+    return codspeed.runRootFrame(() => {
+      for (let i = 0; i < iterations; i++) {
+        fn();
+      }
     });
-    return benchmarks[benchmarks.length - 1];
+  }
+
+  // Records one benchmark from raw rounds. `timesPerRoundNs[i]` is the total
+  // time of round i, which ran `itersPerRound[i]` iterations.
+  function record(name, file, itersPerRound, timesPerRoundNs) {
+    codspeed.addWalltimeBenchmark(name, uriFor(file, name), itersPerRound, timesPerRoundNs);
+    count++;
+    const perIter = timesPerRoundNs.map((t, i) => t / itersPerRound[i]).sort((a, b) => a - b);
+    const mean = perIter.reduce((a, t) => a + t, 0) / perIter.length;
+    print(
+      name.padEnd(40) +
+        ("mean " + formatNs(mean)).padEnd(20) +
+        ("median " + formatNs(perIter[perIter.length >> 1])).padEnd(22) +
+        perIter.length + " rounds"
+    );
   }
 
   // Times `fn` in-process: warm up for `warmupTimeNs`, pick an iteration
@@ -121,41 +80,42 @@ var codspeedHarness = (function () {
       setup();
     }
 
-    let warmupIters = 0;
     const warmupStart = nowNs();
     do {
       fn();
-      warmupIters++;
     } while (nowNs() - warmupStart < config.warmupTimeNs);
 
     let iterPerRound = 1;
-    while (iterPerRound < 2 ** 30 && __codspeed_root_frame__(fn, iterPerRound) < config.minRoundTimeNs) {
-      iterPerRound *= 2;
+    if (!singleShot) {
+      while (iterPerRound < 2 ** 30 && measureRound(fn, iterPerRound) < config.minRoundTimeNs) {
+        iterPerRound *= 2;
+      }
     }
 
-    const samples = [];
+    const times = [];
     const start = nowNs();
-    hooks.startBenchmark();
+    codspeed.startBenchmark(uriFor(file, name));
     do {
-      samples.push(__codspeed_root_frame__(fn, iterPerRound) / iterPerRound);
-    } while (samples.length < config.minRounds || nowNs() - start < config.maxTimeNs);
-    hooks.stopBenchmark();
+      times.push(measureRound(fn, iterPerRound));
+    } while (!singleShot && (times.length < config.minRounds || nowNs() - start < config.maxTimeNs));
+    codspeed.endBenchmark();
 
     if (teardown) {
       teardown();
     }
 
-    const result = record(name, file, samples, {
-      iterPerRound,
-      warmupIters,
-      benchConfig: {
-        warmup_time_ns: config.warmupTimeNs,
-        min_round_time_ns: config.minRoundTimeNs,
-        max_time_ns: config.maxTimeNs,
-      },
-    });
-    print(formatRow(result));
-    return result;
+    record(name, file, times.map(() => iterPerRound), times);
+  }
+
+  // For drivers that time their own iterations: run `fn` once under the
+  // profiler root frame, as the named benchmark.
+  function runInstrumented(uri, fn) {
+    codspeed.startBenchmark(uri);
+    try {
+      codspeed.runRootFrame(fn);
+    } finally {
+      codspeed.endBenchmark();
+    }
   }
 
   function formatNs(ns) {
@@ -165,48 +125,22 @@ var codspeedHarness = (function () {
     return ns.toFixed(1) + " ns";
   }
 
-  function formatRow(b) {
-    const s = b.stats;
-    return (
-      b.name.padEnd(40) +
-      ("mean " + formatNs(s.mean_ns)).padEnd(20) +
-      ("median " + formatNs(s.median_ns)).padEnd(22) +
-      ("cv " + ((100 * s.stdev_ns) / s.mean_ns).toFixed(1) + "%").padEnd(12) +
-      s.rounds + " rounds x " + s.iter_per_round
-    );
-  }
-
-  function asciiBytes(text) {
-    const escaped = text.replace(/[\u0080-\uffff]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
-    const bytes = new Uint8Array(escaped.length);
-    for (let i = 0; i < escaped.length; i++) {
-      bytes[i] = escaped.charCodeAt(i);
-    }
-    return bytes;
-  }
-
   function finish() {
-    if (benchmarks.length === 0) {
+    if (count === 0) {
       throw new Error("codspeed harness: no benchmarks were recorded");
+    }
+    if (singleShot) {
+      print("\n" + count + " benchmarks measured by the runner (" + runnerMode + ")");
+      return;
     }
     const folder = os.getenv("CODSPEED_PROFILE_FOLDER");
     if (folder === undefined || folder === "") {
-      print("\n" + benchmarks.length + " benchmarks (CODSPEED_PROFILE_FOLDER unset, results not written)");
+      print("\n" + count + " benchmarks (CODSPEED_PROFILE_FOLDER unset, report not written)");
       return;
     }
-    const resultsDir = folder + "/results";
-    if (os.system("mkdir -p '" + resultsDir + "'") !== 0) {
-      throw new Error("codspeed harness: cannot create " + resultsDir);
-    }
-    const path = resultsDir + "/" + os.getpid() + ".json";
-    const results = {
-      creator: { name: INTEGRATION_NAME, version: INTEGRATION_VERSION, pid: os.getpid() },
-      instrument: { type: "walltime" },
-      benchmarks,
-    };
-    os.file.writeTypedArrayToFile(path, asciiBytes(JSON.stringify(results, null, 2)));
-    print("\n[CodSpeed] " + benchmarks.length + " benchmarks written to " + path);
+    codspeed.writeWalltimeReport();
+    print("[CodSpeed] " + count + " benchmarks reported");
   }
 
-  return { bench, record, finish, config };
+  return { bench, record, runInstrumented, uriFor, finish, config };
 })();
