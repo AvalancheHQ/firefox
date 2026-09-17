@@ -1,7 +1,10 @@
 name: CodSpeed
 
-# Builds the SpiderMonkey JS shell and runs the six-speed suite through the
-# CodSpeed walltime instrument on the gen2 staging macro runners (COD-3534).
+# Builds the SpiderMonkey JS shell once, then runs each JS shell benchmark
+# suite through the CodSpeed walltime instrument on the gen2 staging macro
+# runners (COD-3534). The drivers in third_party/webkit/PerformanceTests/
+# codspeed/ time every subtest in-process and write CodSpeed's walltime
+# results themselves, so the shell is not measured as one opaque command.
 
 on:
   push:
@@ -26,8 +29,8 @@ env:
   CBINDGEN_VERSION: "0.29.4"
 
 jobs:
-  six-speed:
-    name: six-speed (walltime)
+  build:
+    name: build js shell
     runs-on: codspeed-macro-staging-x86-ryzen-9950x-ubuntu-24-04
     timeout-minutes: 60
 
@@ -38,10 +41,8 @@ jobs:
         run: |
           hostname
           cat /etc/codspeed-image-release || true
-          echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated)"
-          echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
-          echo "nproc:         $(nproc)"
-          echo "shm:           $(ls -ld /dev/shm 2>&1)"
+          echo "nproc: $(nproc)"
+          echo "shm:   $(ls -ld /dev/shm 2>&1)"
 
       # mozbuild's BuildReader opens a ProcessPoolExecutor, which needs POSIX
       # semaphores; these runners come up without a /dev/shm mount.
@@ -51,7 +52,6 @@ jobs:
             sudo mkdir -p /dev/shm
             sudo mount -t tmpfs -o size=1G,mode=1777 tmpfs /dev/shm
           fi
-          df -h /dev/shm
           python3 -c 'import multiprocessing; multiprocessing.Lock(); print("posix semaphores ok")'
 
       # The image ships rustup, m4, make, pkg-config and python3; mach needs a
@@ -116,9 +116,90 @@ jobs:
           ls -la obj-codspeed/dist/bin/js
           obj-codspeed/dist/bin/js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
 
+      # Symbols are useless without the profiler and would make the artifact
+      # 300 MB instead of 30.
+      - name: Strip the shell
+        run: |
+          mkdir -p artifact
+          "llvm-strip-${CLANG_VERSION}" -o artifact/js obj-codspeed/dist/bin/js
+          ls -la artifact/js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-shell-${{ github.sha }}
+          path: artifact/js
+          retention-days: 1
+          if-no-files-found: error
+
+  bench:
+    name: ${{ matrix.suite.name }}
+    needs: build
+    runs-on: codspeed-macro-staging-x86-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: six-speed
+            directory: six-speed
+          - name: sunspider
+            directory: SunSpider/sunspider-0.9.1
+          - name: ares6
+            directory: ARES-6
+          # Not vendored; fetched from the same pinned archives Mozilla's CI
+          # uses (taskcluster/kinds/fetch/benchmarks.yml).
+          - name: octane
+            directory: octane
+            fetch: https://github.com/mozilla/perf-automation/releases/download/octane-v1/octane-0f5b8d48d4a9.zip
+            sha256: 38425ee1abfc5feca178b2f60fbd82b5873897c345112a85359be00024402f9f
+          - name: web-tooling-benchmark
+            directory: web-tooling-benchmark
+            fetch: https://github.com/mozilla/perf-automation/releases/download/V1/web-tooling-benchmark-b2ac25c897c9.zip
+            sha256: 93b0b51df0cec3ca9bfa0bdf81d782306dcf18532e39b3ff3180409125daaff1
+
+    env:
+      SUITES: ${{ github.workspace }}/third_party/webkit/PerformanceTests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-shell-${{ github.sha }}
+          path: ${{ github.workspace }}/bin
+
+      - name: Put the shell on PATH
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/bin/js"
+          echo "${GITHUB_WORKSPACE}/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the suite
+        if: matrix.suite.fetch
+        working-directory: ${{ env.SUITES }}
+        run: |
+          curl -fsSL -o suite.zip "${{ matrix.suite.fetch }}"
+          echo "${{ matrix.suite.sha256 }}  suite.zip" | sha256sum -c -
+          unzip -q suite.zip
+          rm suite.zip
+          test -d "${{ matrix.suite.directory }}"
+
+      - name: Report the machine and shell
+        run: |
+          hostname
+          cat /etc/codspeed-image-release || true
+          echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated)"
+          echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
+          js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
+
+      # The profiler is off on purpose: the shell cannot mark benchmark
+      # boundaries for perf yet, so a profile could not be attributed to the
+      # individual subtests anyway.
       - name: Run benchmarks
         uses: CodSpeedHQ/action@main
+        env:
+          CODSPEED_PROFILER_ENABLED: "false"
         with:
           mode: walltime
           upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
-          config: codspeed.yaml
+          working-directory: ${{ env.SUITES }}/${{ matrix.suite.directory }}
+          run: js --strict-benchmark-mode ${{ env.SUITES }}/codspeed/${{ matrix.suite.name }}.js
