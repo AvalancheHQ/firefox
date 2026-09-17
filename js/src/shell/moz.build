@@ -35,8 +35,11 @@ SOURCES += [
     "codspeed/src/walltime.cpp",
     "codspeed/src/workspace.cpp",
 ]
-# Generated C that is not warning-clean.
+# Generated C that is not warning-clean, and that declares libc functions
+# itself (`printf`), which glibc's fortify macros would rewrite.
 SOURCES["codspeed/instrument_hooks.c"].flags += [
+    "-U_FORTIFY_SOURCE",
+    "-D_FORTIFY_SOURCE=0",
     "-Wno-unused-variable",
     "-Wno-unused-parameter",
     "-Wno-unused-but-set-variable",
