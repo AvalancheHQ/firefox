@@ -1,7 +1,7 @@
 name: CodSpeed
 
 # Builds the SpiderMonkey JS shell once, then runs each JS shell benchmark
-# suite through the CodSpeed walltime instrument on the gen2 staging macro
+# suite through the CodSpeed walltime instrument on the gen2 macro
 # runners (COD-3534). The drivers in third_party/webkit/PerformanceTests/
 # codspeed/ time every subtest in-process and write CodSpeed's walltime
 # results themselves, so the shell is not measured as one opaque command.
@@ -43,7 +43,7 @@ env:
 jobs:
   build:
     name: build js shell
-    runs-on: codspeed-macro-staging-x86-ryzen-9950x-ubuntu-24-04
+    runs-on: codspeed-macro-x86-ryzen-9950x-ubuntu-24-04
     timeout-minutes: 60
 
     steps:
@@ -148,7 +148,7 @@ jobs:
   bench:
     name: ${{ matrix.suite.name }}
     needs: build
-    runs-on: codspeed-macro-staging-x86-ryzen-9950x-ubuntu-24-04
+    runs-on: codspeed-macro-x86-ryzen-9950x-ubuntu-24-04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -223,6 +223,5 @@ jobs:
           CODSPEED_PROFILER_ENABLED: ${{ inputs.profiler == true && 'true' || 'false' }}
         with:
           mode: walltime
-          upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
           working-directory: ${{ env.SUITES }}/${{ matrix.suite.directory }}
           run: js --strict-benchmark-mode ${{ env.SUITES }}/codspeed/${{ matrix.suite.name }}.js
