@@ -223,5 +223,6 @@ jobs:
           CODSPEED_PROFILER_ENABLED: ${{ inputs.profiler == true && 'true' || 'false' }}
         with:
           mode: walltime
+          upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
           working-directory: ${{ env.SUITES }}/${{ matrix.suite.directory }}
           run: js --strict-benchmark-mode ${{ env.SUITES }}/codspeed/${{ matrix.suite.name }}.js
