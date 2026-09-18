@@ -19,9 +19,10 @@ on:
         default: false
 
 # The macro fleet runs one job per machine; a superseded push should not hold
-# it for another twenty minutes.
+# it for another twenty minutes. Manual dispatches are each their own group so
+# repeated runs of one commit can queue up for noise measurements.
 concurrency:
-  group: codspeed-${{ github.ref }}
+  group: codspeed-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 permissions:
