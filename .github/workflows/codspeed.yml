@@ -1,0 +1,228 @@
+name: CodSpeed
+
+# Builds the SpiderMonkey JS shell once, then runs each JS shell benchmark
+# suite through the CodSpeed walltime instrument on the gen2 macro
+# runners (COD-3534). The drivers in third_party/webkit/PerformanceTests/
+# codspeed/ time every subtest in-process and write CodSpeed's walltime
+# results themselves, so the shell is not measured as one opaque command.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      profiler:
+        description: Record perf profiles (per-benchmark flamegraphs)
+        type: boolean
+        default: false
+
+# The macro fleet runs one job per machine; a superseded push should not hold
+# it for another twenty minutes. Manual dispatches are each their own group so
+# repeated runs of one commit can queue up for noise measurements.
+concurrency:
+  group: codspeed-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write # for OpenID Connect authentication with CodSpeed
+
+env:
+  MOZCONFIG: ${{ github.workspace }}/.github/mozconfig.codspeed
+  MOZBUILD_STATE_PATH: ${{ github.workspace }}/.mozbuild
+  # Pinned so the generated code, and therefore the measurements, only change
+  # when we bump them.
+  # The tree rejects anything older than 19.0 (build/moz.configure/toolchain.configure),
+  # and the runner image only ships up to clang 18.
+  CLANG_VERSION: "19"
+  RUST_VERSION: "1.94.1"
+  CBINDGEN_VERSION: "0.29.4"
+
+jobs:
+  build:
+    name: build js shell
+    runs-on: codspeed-macro-x86-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 60
+
+    steps:
+      # depth 1 already: the ~100 s here is one commit's 480k-file tree, not
+      # history, and the js build reads too much of it to scope further.
+      - uses: actions/checkout@v4
+
+      - name: Report the machine
+        run: |
+          hostname
+          cat /etc/codspeed-image-release || true
+          echo "nproc: $(nproc)"
+          echo "shm:   $(ls -ld /dev/shm 2>&1)"
+
+      # mozbuild's BuildReader opens a ProcessPoolExecutor, which needs POSIX
+      # semaphores; these runners come up without a /dev/shm mount.
+      - name: Ensure shared memory is available
+        run: |
+          if ! python3 -c 'import multiprocessing; multiprocessing.Lock()' 2>/dev/null; then
+            sudo mkdir -p /dev/shm
+            sudo mount -t tmpfs -o size=1G,mode=1777 tmpfs /dev/shm
+          fi
+          python3 -c 'import multiprocessing; multiprocessing.Lock(); print("posix semaphores ok")'
+
+      # The image ships rustup, m4, make, pkg-config and python3; mach needs a
+      # venv module, a new enough clang, and its own cbindgen.
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-venv
+          if ! command -v "clang-${CLANG_VERSION}" >/dev/null; then
+            curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s -- "${CLANG_VERSION}"
+          fi
+          sudo apt-get install -y --no-install-recommends "lld-${CLANG_VERSION}" "llvm-${CLANG_VERSION}"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cbindgen
+        id: cbindgen-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: cbindgen-${{ runner.os }}-${{ env.CBINDGEN_VERSION }}
+
+      - name: Install cbindgen
+        if: steps.cbindgen-cache.outputs.cache-hit != 'true'
+        run: cargo install cbindgen --locked --version ${{ env.CBINDGEN_VERSION }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache mach virtualenvs
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MOZBUILD_STATE_PATH }}
+          key: mozbuild-${{ runner.os }}-${{ hashFiles('build/moz.configure/**', 'python/sites/*.txt') }}
+          restore-keys: |
+            mozbuild-${{ runner.os }}-
+
+      - name: Report the toolchain
+        env:
+          CC: clang-${{ env.CLANG_VERSION }}
+          CXX: clang++-${{ env.CLANG_VERSION }}
+        run: |
+          $CC --version | head -1
+          rustc --version
+          cargo --version
+          cbindgen --version
+          sccache --version
+          python3 --version
+
+      - name: Build the JS shell
+        env:
+          CC: clang-${{ env.CLANG_VERSION }}
+          CXX: clang++-${{ env.CLANG_VERSION }}
+          SCCACHE_GHA_ENABLED: "true"
+        run: ./mach build -j$(nproc)
+
+      - name: Report build cache and binary state
+        run: |
+          sccache --show-stats
+          ls -la obj-codspeed/dist/bin/js
+          obj-codspeed/dist/bin/js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
+
+      # Symbols are useless without the profiler and would make the artifact
+      # 300 MB instead of 30.
+      - name: Strip the shell
+        run: |
+          mkdir -p artifact
+          "llvm-strip-${CLANG_VERSION}" -o artifact/js obj-codspeed/dist/bin/js
+          ls -la artifact/js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-shell-${{ github.sha }}
+          path: artifact/js
+          retention-days: 1
+          if-no-files-found: error
+
+  bench:
+    name: ${{ matrix.suite.name }}
+    needs: build
+    runs-on: codspeed-macro-x86-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: six-speed
+            directory: six-speed
+          - name: sunspider
+            directory: SunSpider/sunspider-0.9.1
+          - name: ares6
+            directory: ARES-6
+          # Not vendored; fetched from the same pinned archives Mozilla's CI
+          # uses (taskcluster/kinds/fetch/benchmarks.yml).
+          - name: octane
+            directory: octane
+            fetch: https://github.com/mozilla/perf-automation/releases/download/octane-v1/octane-0f5b8d48d4a9.zip
+            sha256: 38425ee1abfc5feca178b2f60fbd82b5873897c345112a85359be00024402f9f
+          - name: web-tooling-benchmark
+            directory: web-tooling-benchmark
+            fetch: https://github.com/mozilla/perf-automation/releases/download/V1/web-tooling-benchmark-b2ac25c897c9.zip
+            sha256: 93b0b51df0cec3ca9bfa0bdf81d782306dcf18532e39b3ff3180409125daaff1
+
+    env:
+      SUITES: ${{ github.workspace }}/third_party/webkit/PerformanceTests
+
+    steps:
+      # The full tree is 480k files and takes two minutes to check out; the
+      # suites need 160 of them.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            third_party/webkit/PerformanceTests/codspeed
+            third_party/webkit/PerformanceTests/six-speed
+            third_party/webkit/PerformanceTests/SunSpider
+            third_party/webkit/PerformanceTests/ARES-6
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-shell-${{ github.sha }}
+          path: ${{ github.workspace }}/bin
+
+      - name: Put the shell on PATH
+        run: |
+          chmod +x "${GITHUB_WORKSPACE}/bin/js"
+          echo "${GITHUB_WORKSPACE}/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the suite
+        if: matrix.suite.fetch
+        working-directory: ${{ env.SUITES }}
+        run: |
+          curl -fsSL -o suite.zip "${{ matrix.suite.fetch }}"
+          echo "${{ matrix.suite.sha256 }}  suite.zip" | sha256sum -c -
+          unzip -q suite.zip
+          rm suite.zip
+          test -d "${{ matrix.suite.directory }}"
+
+      - name: Report the machine and shell
+        run: |
+          hostname
+          cat /etc/codspeed-image-release || true
+          echo "isolated cpus: $(cat /sys/devices/system/cpu/isolated)"
+          echo "cpus allowed:  $(grep Cpus_allowed_list /proc/self/status | awk '{print $NF}')"
+          js --strict-benchmark-mode -e 'print("shell ok, debug=" + getBuildConfiguration().debug)'
+
+      # Off by default while the harness settles; the shell marks benchmark
+      # boundaries through codspeed-cpp core, so turning it on gives
+      # per-benchmark flamegraphs with no other change.
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@main
+        env:
+          CODSPEED_PROFILER_ENABLED: ${{ inputs.profiler == true && 'true' || 'false' }}
+        with:
+          mode: walltime
+          upload-url: ${{ secrets.CODSPEED_STAGING_UPLOAD_URL }}
+          working-directory: ${{ env.SUITES }}/${{ matrix.suite.directory }}
+          run: js --strict-benchmark-mode ${{ env.SUITES }}/codspeed/${{ matrix.suite.name }}.js

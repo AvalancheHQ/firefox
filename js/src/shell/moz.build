@@ -14,6 +14,7 @@ include("../js-cxxflags.mozbuild")
 include("../js-standalone.mozbuild")
 
 UNIFIED_SOURCES += [
+    "CodSpeed.cpp",
     "js.cpp",
     "jsoptparse.cpp",
     "jsshell.cpp",
@@ -22,6 +23,41 @@ UNIFIED_SOURCES += [
     "ShellModuleObjectWrapper.cpp",
     "WasmTesting.cpp",
 ]
+
+# Vendored codspeed-cpp core 2.3.0 (https://github.com/CodSpeedHQ/codspeed-cpp,
+# commit 1c22e59) with its instrument-hooks (commit ecdf31a). Not unified: the
+# core uses <filesystem>/<fstream> and its own namespace conventions.
+SOURCES += [
+    "codspeed/instrument_hooks.c",
+    "codspeed/src/codspeed.cpp",
+    "codspeed/src/measurement.cpp",
+    "codspeed/src/uri.cpp",
+    "codspeed/src/walltime.cpp",
+    "codspeed/src/workspace.cpp",
+]
+# Generated C that is not warning-clean, and that declares libc functions
+# itself (`printf`), which glibc's fortify macros would rewrite.
+SOURCES["codspeed/instrument_hooks.c"].flags += [
+    "-U_FORTIFY_SOURCE",
+    "-D_FORTIFY_SOURCE=0",
+    "-Wno-unused-variable",
+    "-Wno-unused-parameter",
+    "-Wno-unused-but-set-variable",
+    "-Wno-type-limits",
+    "-Wno-format",
+    "-Wno-format-security",
+    "-Wno-unused-function",
+    "-Wno-sign-compare",
+    "-Wno-missing-braces",
+]
+LOCAL_INCLUDES += [
+    "codspeed/include",
+    "codspeed/instrument-hooks/includes",
+]
+DEFINES["CODSPEED_VERSION"] = '"2.3.0"'
+DEFINES["CODSPEED_CXX_COMPILER_ID"] = '"%s"' % CONFIG["CC_TYPE"]
+DEFINES["CODSPEED_CXX_COMPILER_VERSION"] = '"%s"' % CONFIG["CC_VERSION"]
+DEFINES["CODSPEED_BUILD_TYPE"] = '"%s"' % ("Debug" if CONFIG["MOZ_DEBUG"] else "Release")
 
 if CONFIG["FUZZING_INTERFACES"]:
     UNIFIED_SOURCES += ["jsrtfuzzing/jsrtfuzzing.cpp"]
